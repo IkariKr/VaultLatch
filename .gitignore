@@ -1,0 +1,13 @@
+bin/
+obj/
+dist/
+dist-next/
+dist-vaultlatch/
+.dist/
+*.user
+*.suo
+*.pdb
+NUL
+
+# Local pre-rename project file retained only for the existing installation.
+LifeOSGuard.csproj
