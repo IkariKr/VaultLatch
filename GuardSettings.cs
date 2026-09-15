@@ -86,12 +86,28 @@ internal sealed class SettingsStore
         }
     }
 
+    public bool TrySave(GuardSettings settings)
+    {
+        try
+        {
+            settings.SettingsVersion = GuardSettings.CurrentSettingsVersion;
+            settings.Normalize();
+            Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
+            File.WriteAllText(_settingsPath, JsonSerializer.Serialize(settings, JsonOptions));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Save(GuardSettings settings)
     {
-        settings.SettingsVersion = GuardSettings.CurrentSettingsVersion;
-        settings.Normalize();
-        Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
-        File.WriteAllText(_settingsPath, JsonSerializer.Serialize(settings, JsonOptions));
+        if (!TrySave(settings))
+        {
+            throw new IOException($"无法保存 VaultLatch 设置：{_settingsPath}");
+        }
     }
 
     private static int GetStoredVersion(string json)

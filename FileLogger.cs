@@ -3,16 +3,29 @@ namespace VaultLatch;
 internal sealed class FileLogger : IDisposable
 {
     private readonly object _gate = new();
-    private readonly string _logPath;
+    private readonly string? _logPath;
 
     public FileLogger()
     {
-        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VaultLatch");
-        Directory.CreateDirectory(directory);
-        _logPath = Path.Combine(directory, "VaultLatch.log");
+        try
+        {
+            var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                root = Path.GetTempPath();
+            }
+
+            var directory = Path.Combine(root, "VaultLatch");
+            Directory.CreateDirectory(directory);
+            _logPath = Path.Combine(directory, "VaultLatch.log");
+        }
+        catch
+        {
+            _logPath = null;
+        }
     }
 
-    public string LogPath => _logPath;
+    public string LogPath => _logPath ?? string.Empty;
 
     public void Info(string message) => Write("INFO", message);
 
@@ -23,9 +36,21 @@ internal sealed class FileLogger : IDisposable
 
     private void Write(string level, string message)
     {
-        lock (_gate)
+        if (_logPath is null)
         {
-            File.AppendAllText(_logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}{Environment.NewLine}");
+            return;
+        }
+
+        try
+        {
+            lock (_gate)
+            {
+                File.AppendAllText(_logPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // Logging must never propagate a removable-disk or file-lock failure.
         }
     }
 

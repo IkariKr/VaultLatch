@@ -82,7 +82,16 @@ internal sealed class SyncthingController
 
     public bool MarkerExists(GuardSettings settings)
     {
-        return File.Exists(Path.Combine(settings.VaultPath, ".stfolder")) || Directory.Exists(Path.Combine(settings.VaultPath, ".stfolder"));
+        try
+        {
+            var markerPath = Path.Combine(settings.VaultPath, ".stfolder");
+            return File.Exists(markerPath) || Directory.Exists(markerPath);
+        }
+        catch (Exception exception)
+        {
+            _logger.Error("检查 Syncthing marker 失败", exception);
+            return false;
+        }
     }
 
     private static string? ResolveExecutable(string configuredPath)
@@ -100,13 +109,20 @@ internal sealed class SyncthingController
         }
 
         const string installRoot = @"D:\Program Files\Syncthing";
-        if (Directory.Exists(installRoot))
+        try
         {
-            var candidate = Directory.EnumerateFiles(installRoot, "syncthing.exe", SearchOption.AllDirectories).FirstOrDefault();
-            if (candidate is not null)
+            if (Directory.Exists(installRoot))
             {
-                return candidate;
+                var candidate = Directory.EnumerateFiles(installRoot, "syncthing.exe", SearchOption.AllDirectories).FirstOrDefault();
+                if (candidate is not null)
+                {
+                    return candidate;
+                }
             }
+        }
+        catch
+        {
+            // Removable or partially accessible install directories are treated as unavailable.
         }
 
         return null;

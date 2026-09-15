@@ -8,7 +8,7 @@ internal sealed class GuardApplicationContext : ApplicationContext
     private const string ApplicationName = "VaultLatch";
     private readonly FileLogger _logger = new();
     private readonly SettingsStore _settingsStore = new();
-    private readonly StartupManager _startupManager = new();
+    private readonly StartupManager _startupManager;
     private readonly VeraCryptController _veraCrypt;
     private readonly SyncthingController _syncthing;
     private readonly ObsidianController _obsidian;
@@ -17,13 +17,20 @@ internal sealed class GuardApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _startupMenuItem;
     private readonly System.Windows.Forms.Timer _idleTimer;
     private readonly PowerEventWindow _powerWindow;
+    private readonly string _sourcePath;
+    private readonly string? _stopEventName;
     private GuardSettings _settings;
     private int _protectInProgress;
     private int _mountInProgress;
     private bool _isExiting;
 
-    public GuardApplicationContext()
+    public GuardApplicationContext(string? stopEventName)
     {
+        _stopEventName = stopEventName;
+        _sourcePath = Watchdog.GetSourcePath(Environment.GetCommandLineArgs())
+            ?? Environment.ProcessPath
+            ?? Application.ExecutablePath;
+        _startupManager = new StartupManager(_sourcePath);
         _settings = _settingsStore.Load();
         _veraCrypt = new VeraCryptController(_logger);
         _syncthing = new SyncthingController(_logger);
@@ -35,8 +42,8 @@ internal sealed class GuardApplicationContext : ApplicationContext
         _statusMenuItem = new ToolStripMenuItem("状态：检查中…") { Enabled = false };
         menu.Items.Add(_statusMenuItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("解锁 / 挂载加密卷", null, async (_, _) => await MountAsync());
-        menu.Items.Add("安全锁定加密卷", null, async (_, _) => await ProtectAsync("手动锁定"));
+        menu.Items.Add("解锁 / 挂载加密卷", null, (_, _) => RunSafely(MountAsync, "托盘挂载操作"));
+        menu.Items.Add("安全锁定加密卷", null, (_, _) => RunSafely(() => ProtectAsync("手动锁定"), "托盘锁定操作"));
         menu.Items.Add("锁定 Windows", null, (_, _) => RequestWindowsLock());
         menu.Items.Add("打开 Vault", null, (_, _) => OpenVault());
         menu.Items.Add(new ToolStripSeparator());
@@ -55,7 +62,7 @@ internal sealed class GuardApplicationContext : ApplicationContext
             ContextMenuStrip = menu,
             Visible = true,
         };
-        _trayIcon.DoubleClick += async (_, _) =>
+        _trayIcon.DoubleClick += (_, _) => RunSafely(async () =>
         {
             if (_veraCrypt.IsMounted(_settings))
             {
@@ -65,34 +72,34 @@ internal sealed class GuardApplicationContext : ApplicationContext
             {
                 await MountAsync();
             }
-        };
+        }, "托盘双击操作");
 
         _startupMenuItem.Checked = _startupManager.IsEnabled();
 
         _idleTimer = new System.Windows.Forms.Timer { Interval = 5_000 };
-        _idleTimer.Tick += async (_, _) =>
+        _idleTimer.Tick += (_, _) => RunSafely(async () =>
         {
             UpdateStatusText();
             await CheckIdleAsync();
-        };
+        }, "定时状态检查");
         _idleTimer.Start();
 
         SystemEvents.SessionSwitch += OnSessionSwitch;
         _powerWindow = new PowerEventWindow();
-        _powerWindow.DisplayTurnedOff += async (_, _) =>
+        _powerWindow.DisplayTurnedOff += (_, _) => RunSafely(async () =>
         {
             if (_settings.LockOnDisplayOff)
             {
                 await ProtectAsync("显示器已关闭");
             }
-        };
-        _powerWindow.SystemSuspending += async (_, _) =>
+        }, "显示器关闭事件");
+        _powerWindow.SystemSuspending += (_, _) => RunSafely(async () =>
         {
             if (_settings.LockOnSuspend)
             {
                 await ProtectAsync("系统即将挂起");
             }
-        };
+        }, "系统挂起事件");
 
         _logger.Info($"VaultLatch 已启动；卷={_settings.VolumePath}；盘符={_settings.DriveLetter}:；Folder={_settings.SyncthingFolderId}。");
         _logger.Info($"VeraCrypt 驱动直连访问：{(_veraCrypt.CanAccessDriver() ? "可用" : "不可用")}。");
@@ -159,12 +166,33 @@ internal sealed class GuardApplicationContext : ApplicationContext
         }
     }
 
-    private async void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
         if (e.Reason == SessionSwitchReason.SessionLock && _settings.LockOnSessionLock)
         {
-            _logger.Info("已收到 Windows SessionLock 事件；系统已进入锁屏状态，开始后台保护加密卷。");
-            await ProtectAsync("Windows 已锁定");
+            RunSafely(async () =>
+            {
+                _logger.Info("已收到 Windows SessionLock 事件；系统已进入锁屏状态，开始后台保护加密卷。");
+                await ProtectAsync("Windows 已锁定");
+            }, "Windows 锁屏事件");
+        }
+    }
+
+    private void RunSafely(Func<Task> operation, string operationName)
+    {
+        _ = RunSafelyAsync(operation, operationName);
+    }
+
+    private async Task RunSafelyAsync(Func<Task> operation, string operationName)
+    {
+        try
+        {
+            await operation().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            _logger.Error($"{operationName}失败", exception);
+            CrashReporter.Report($"{operationName}未处理异常", exception);
         }
     }
 
@@ -358,8 +386,17 @@ internal sealed class GuardApplicationContext : ApplicationContext
             return;
         }
 
-        _settings = dialog.Settings;
-        _settingsStore.Save(_settings);
+        var previousSettings = _settings;
+        var candidateSettings = dialog.Settings;
+        if (!_settingsStore.TrySave(candidateSettings))
+        {
+            _logger.Error("设置保存失败，保留当前内存配置。");
+            _startupMenuItem.Checked = previousSettings.StartWithWindows;
+            ShowBalloon("设置未保存", "配置文件不可写，已保留原设置。", ToolTipIcon.Warning);
+            return;
+        }
+
+        _settings = candidateSettings;
         ApplyStartupSetting(_settings.StartWithWindows);
         _startupMenuItem.Checked = _startupManager.IsEnabled();
         _logger.Info($"设置已保存；空闲={_settings.IdleTimeoutMinutes}min；grace={_settings.GraceSeconds}s；force={_settings.ForceUnmountFallback}。");
@@ -374,9 +411,18 @@ internal sealed class GuardApplicationContext : ApplicationContext
             return;
         }
 
-        _settings.StartWithWindows = _startupMenuItem.Checked;
-        _settingsStore.Save(_settings);
-        ApplyStartupSetting(_settings.StartWithWindows);
+        var desired = _startupMenuItem.Checked;
+        _settings.StartWithWindows = desired;
+        if (!_settingsStore.TrySave(_settings))
+        {
+            _settings.StartWithWindows = !desired;
+            _startupMenuItem.Checked = !desired;
+            _logger.Error("开机自启动设置未能持久化。");
+            ShowBalloon("设置未保存", "配置文件不可写，未更改开机自启动设置。", ToolTipIcon.Warning);
+            return;
+        }
+
+        ApplyStartupSetting(desired);
     }
 
     private void ApplyStartupSetting(bool enabled)
@@ -398,17 +444,32 @@ internal sealed class GuardApplicationContext : ApplicationContext
             return;
         }
 
-        var mounted = _veraCrypt.IsMounted(_settings);
-        _statusMenuItem.Text = mounted
-            ? $"状态：已解锁（{_settings.DriveLetter}:）"
-            : "状态：已锁定";
-        _trayIcon.Text = mounted ? "VaultLatch - 已解锁" : "VaultLatch - 已锁定";
+        try
+        {
+            var mounted = _veraCrypt.IsMounted(_settings);
+            _statusMenuItem.Text = mounted
+                ? $"状态：已解锁（{_settings.DriveLetter}:）"
+                : "状态：已锁定";
+            _trayIcon.Text = mounted ? "VaultLatch - 已解锁" : "VaultLatch - 已锁定";
+        }
+        catch (Exception exception)
+        {
+            _logger.Error("更新托盘状态失败", exception);
+            _statusMenuItem.Text = "状态：设备不可用";
+            _trayIcon.Text = "VaultLatch - 设备不可用";
+        }
     }
 
     private void OpenLog()
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(_logger.LogPath) || !File.Exists(_logger.LogPath))
+            {
+                ShowBalloon("日志不可用", "当前没有可打开的日志文件。", ToolTipIcon.Warning);
+                return;
+            }
+
             Process.Start(new ProcessStartInfo(_logger.LogPath) { UseShellExecute = true });
         }
         catch (Exception exception)
@@ -419,7 +480,14 @@ internal sealed class GuardApplicationContext : ApplicationContext
 
     private void ShowBalloon(string title, string message, ToolTipIcon icon)
     {
-        _trayIcon.ShowBalloonTip(5_000, title, message, icon);
+        try
+        {
+            _trayIcon.ShowBalloonTip(5_000, title, message, icon);
+        }
+        catch (Exception exception)
+        {
+            _logger.Error("显示托盘提示失败", exception);
+        }
     }
 
     private void ExitApplication()
@@ -431,6 +499,7 @@ internal sealed class GuardApplicationContext : ApplicationContext
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         _logger.Info("VaultLatch 已退出。\n");
+        Watchdog.RequestStop(_stopEventName);
         _logger.Dispose();
         ExitThread();
     }
