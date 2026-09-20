@@ -75,12 +75,9 @@ internal static class Watchdog
             }
 
             stablePath = GetStableExecutablePath(sourcePath);
-            Directory.CreateDirectory(StableDirectory);
-            if (!PathsEqual(sourcePath, stablePath))
+            if (!PathsEqual(sourcePath, stablePath) && !AreApplicationFilesCurrent(sourcePath, StableDirectory))
             {
-                var temporaryPath = stablePath + ".tmp";
-                File.Copy(sourcePath, temporaryPath, overwrite: true);
-                File.Move(temporaryPath, stablePath, overwrite: true);
+                CopyApplicationFiles(sourcePath, StableDirectory);
             }
 
             return stablePath;
@@ -89,6 +86,92 @@ internal static class Watchdog
         {
             logger.Write("创建本地稳定副本失败", exception);
             return stablePath is not null && File.Exists(stablePath) ? stablePath : null;
+        }
+    }
+
+    internal static bool AreApplicationFilesCurrent(string sourcePath, string destinationDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath) || !Directory.Exists(destinationDirectory))
+        {
+            return false;
+        }
+
+        var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(sourcePath));
+        if (string.IsNullOrWhiteSpace(sourceDirectory))
+        {
+            return false;
+        }
+
+        var sourceFiles = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => Path.GetRelativePath(sourceDirectory, path), StringComparer.OrdinalIgnoreCase);
+        var destinationFiles = Directory.EnumerateFiles(destinationDirectory, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => Path.GetRelativePath(destinationDirectory, path), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var relativePath in sourceFiles.Keys)
+        {
+            if (!destinationFiles.TryGetValue(relativePath, out var destinationPath))
+            {
+                return false;
+            }
+
+            var sourceInfo = new FileInfo(sourceFiles[relativePath]);
+            var destinationInfo = new FileInfo(destinationPath);
+            if (sourceInfo.Length != destinationInfo.Length || sourceInfo.LastWriteTimeUtc != destinationInfo.LastWriteTimeUtc)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static void CopyApplicationFiles(string sourcePath, string destinationDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("找不到要复制的应用程序文件。", sourcePath);
+        }
+
+        var sourceDirectory = Path.GetDirectoryName(Path.GetFullPath(sourcePath));
+        if (string.IsNullOrWhiteSpace(sourceDirectory))
+        {
+            throw new InvalidOperationException("无法确定应用程序所在目录。");
+        }
+
+        if (PathsEqual(sourceDirectory, destinationDirectory))
+        {
+            return;
+        }
+
+        var temporaryDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"VaultLatch-copy-{Guid.NewGuid():N}");
+        try
+        {
+            foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(sourceDirectory, sourceFile);
+                var temporaryFile = Path.Combine(temporaryDirectory, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(temporaryFile)!);
+                File.Copy(sourceFile, temporaryFile, overwrite: true);
+            }
+
+            foreach (var temporaryFile in Directory.EnumerateFiles(temporaryDirectory, "*", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(temporaryDirectory, temporaryFile);
+                var destinationFile = Path.Combine(destinationDirectory, relativePath);
+                var sourceFile = Path.Combine(sourceDirectory, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+                File.Copy(temporaryFile, destinationFile, overwrite: true);
+                File.SetLastWriteTimeUtc(destinationFile, File.GetLastWriteTimeUtc(sourceFile));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryDirectory))
+            {
+                Directory.Delete(temporaryDirectory, recursive: true);
+            }
         }
     }
 

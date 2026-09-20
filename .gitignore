@@ -3,6 +3,7 @@ obj/
 dist/
 dist-next/
 dist-vaultlatch/
+dist-local/
 .dist/
 *.user
 *.suo

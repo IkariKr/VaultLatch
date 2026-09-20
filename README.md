@@ -32,10 +32,10 @@ The direct VeraCrypt driver integration is currently developed and tested agains
 ## Build
 
 ```powershell
-dotnet publish VaultLatch.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o .\dist
+dotnet publish .\VaultLatch.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o .\dist-local
 ```
 
-The published executable is `dist\VaultLatch.exe`.
+The published executable is `dist-local\VaultLatch.exe`. Prefer copying the complete single-file output to a local NTFS directory before starting it; do not execute it directly from a removable or OneDrive-backed drive.
 
 ## License
 
